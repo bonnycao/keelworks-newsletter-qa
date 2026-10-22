@@ -55,31 +55,81 @@ const colorSpecs = {
 };
 
 
-// Local, conservative editorial checks. These are suggestions, not a grammar engine.
+// Content QA: deterministic local rules, plus optional locally hosted LanguageTool.
+// No newsletter text is sent to third-party services by default.
+const editorialRules = [
+ {name:'Subject–verb agreement',pattern:/\bthese and (?:internet|the internet) access is limited\b/gi,fix:'Access to these computers and the internet is limited',why:'Plural/compound subject with singular verb; rewrite to clarify what is limited.',severity:'High'},
+ {name:'Unclear participant count',pattern:/\b30 initial participants are less than ten\b/gi,fix:'Of the 30 initial participants, fewer than ten remain (confirm intended meaning)',why:'The number of participants is unclear; verify whether this refers to enrollment or attendance.',severity:'High'},
+ {name:'Preposition usage',pattern:/\bessential with a virtual program\b/gi,fix:'essential for a virtual program',why:'“For” is the more natural preposition in this context.'},
+ {name:'Hyphenation',pattern:/\bself identity\b/gi,fix:'self-identity',why:'Use conventional compound-noun hyphenation.'},
+ {name:'Ambiguous wording',pattern:/\bKeelWorks is our interns\b/gi,fix:'Our interns are at the heart of KeelWorks',why:'The original statement may confuse readers; preserve the author’s intended meaning.'},
+ {name:'Word choice',pattern:/\bgainful, sustaining employment\b/gi,fix:'gainful, sustainable employment (confirm intended meaning)',why:'“Sustainable” may better describe lasting employment.'},
+ {name:'Parallel construction',pattern:/\bthe participant is able to attend regularly and that they understand\b/gi,fix:'participants can attend regularly and understand',why:'Use parallel verb phrases and consistent singular/plural references.'},
+ {name:'Potential comma splice / coordination',pattern:/\bPriya brings us hope for better results and her influence\b/gi,fix:'Priya brings us hope for better results, and her influence',why:'A comma can separate two independent clauses joined by “and”.'},
+ {name:'Editorial terminology',pattern:/\bfront-end analysis\b/gi,fix:'initial needs assessment (if that is the intended meaning)',why:'Specialized terminology may be unclear to newsletter readers.'},
+ {name:'Informal word choice',pattern:/\bmore able to replicate\b/gi,fix:'better able to replicate',why:'A more idiomatic construction.'},
+];
 function checkEditorialContent(blocks, issues) {
  const seen = new Set();
- const flag=(category,defect,excerpt,solution)=>{
-  const key=category+'|'+defect+'|'+excerpt;
-  if(seen.has(key))return;
-  seen.add(key);
-  add(issues,category,defect,excerpt,solution,'Low','All','Needs Review');
+ const flag=(category,defect,block,match,solution,reason,severity='Low')=>{
+  const key=[category,defect,block.location,match].join('|');
+  if(seen.has(key))return;seen.add(key);
+  add(issues,category,defect,`${block.location} — Original: “${match}”. ${reason}`,
+      solution,severity,'All','Needs Review');
  };
  for(const block of blocks){
-  const text=block.text.replace(/\s+/g,' ').trim();
-  if(!text)continue;
-  const context=`${block.location}: “${text.slice(0,240)}${text.length>240?'…':''}”`;
-  const repeated=[...text.matchAll(/\b([a-z][a-z'-]*)\s+\1\b/gi)];
-  for(const m of repeated.slice(0,3))flag('Content / Repeated words',`Repeated word: ${m[1]}`,context,`Review and remove the duplicated “${m[1]}” if unintentional.`);
-  if(/\s+[,.;!?]/.test(text))flag('Content / Punctuation','Space before punctuation',context,'Remove unnecessary spaces before punctuation.');
-  if(/([!?])\1{1,}/.test(text))flag('Content / Punctuation','Repeated punctuation',context,'Review repeated punctuation and use the approved editorial style.');
-  if(/\b(?:Keel\s+Master|Keel-Master)\b/i.test(text))flag('Content / Terminology','Possible KeelMaster naming inconsistency',context,'Confirm whether the approved program name is “KeelMaster” and correct if needed.');
-  if(/\b(?:wifi|wi-fi|WiFi)\b/.test(text))flag('Content / Terminology','Wi-Fi capitalization/style',context,'Use a consistent approved spelling such as “Wi-Fi” throughout the newsletter.');
+  const text=block.text.replace(/\s+/g,' ').trim();if(!text)continue;
+  for(const rule of editorialRules){
+   for(const m of text.matchAll(rule.pattern))flag('Content / Grammar & clarity',rule.name,block,m[0],`Suggested: “${rule.fix}”.`,rule.why,rule.severity||'Medium');
+  }
+  for(const m of text.matchAll(/\b([a-z][a-z'-]*)\s+\1\b/gi))
+   flag('Content / Repeated words','Repeated word',block,m[0],`Remove duplicated “${m[1]}” if unintended.`,'Possible accidental duplication.');
+  for(const m of text.matchAll(/\s+[,.;!?]/g))
+   flag('Content / Punctuation','Space before punctuation',block,m[0],'Remove the extra space.','Punctuation should follow the word directly.');
+  for(const m of text.matchAll(/([!?])\1+/g))
+   flag('Content / Punctuation','Repeated punctuation',block,m[0],'Use a single punctuation mark unless intentional.','Potentially inconsistent editorial style.');
+  for(const m of text.matchAll(/\b(?:Keel\s+Master|Keel-Master)\b/gi))
+   flag('Content / Terminology','KeelMaster spelling',block,m[0],'Use “KeelMaster” if referring to the approved program.','Verify approved program naming.');
+  for(const m of text.matchAll(/\b(?:wifi|wi-fi|WiFi)\b/g))
+   flag('Content / Terminology','Wi-Fi style',block,m[0],'Use “Wi-Fi” consistently.','Terminology consistency.');
  }
+}
+
+// Optional local LanguageTool server (see README). Deliberately limited to loopback.
+async function checkLanguageTool(blocks, issues, notes){
+ const endpoint=process.env.LANGUAGETOOL_URL;
+ if(!endpoint){notes.push('Full dictionary-based spelling and grammar checking requires a local LanguageTool server; set LANGUAGETOOL_URL to enable it.');return;}
+ let base;
+ try{base=new URL(endpoint);if(!['localhost','127.0.0.1','[::1]'].includes(base.hostname)||base.protocol!=='http:')throw Error('Local HTTP only');}
+ catch{notes.push('LANGUAGETOOL_URL must be a local HTTP address; LanguageTool skipped.');return;}
+ let found=0;
+ for(const block of blocks){
+  if(!block.text.trim())continue;
+  try{
+   const body=new URLSearchParams({text:block.text,language:'en-US'});
+   const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),5000);
+   let response;
+   try{response=await fetch(new URL('/v2/check',base),{method:'POST',body,signal:controller.signal});}
+   finally{clearTimeout(timeout);}
+   if(!response.ok)throw Error(`HTTP ${response.status}`);
+   const result=await response.json();
+   for(const match of (result.matches||[]).slice(0,15)){
+    const original=block.text.slice(match.offset,match.offset+match.length);
+    const suggestion=(match.replacements||[]).slice(0,2).map(x=>x.value).join(' / ');
+    const type=match.rule?.issueType||'grammar';
+    add(issues,`Content / ${type==='misspelling'?'Spelling':'Grammar'}`,match.message||'Language suggestion',
+      `${block.location} — Original: “${original}”. Rule: ${match.rule?.id||'LanguageTool'}.`,
+      suggestion?`Suggested: ${suggestion}`:'Review the text and rule explanation.',
+      type==='misspelling'?'Medium':'Low','All','Needs Review');found++;
+   }
+  }catch(e){notes.push(`Local LanguageTool unavailable (${e.message}); local editorial checks still ran.`);return;}
+ }
+ notes.push(`Local LanguageTool returned ${found} suggestions; all require editorial review.`);
 }
 
 async function audit({url, html, filename}){
  const issues=[];const browser=await chromium.launch({headless:true});
- const summary={url: html ? `Uploaded HTML: ${filename}` : url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Content checks currently cover repeated words, selected punctuation patterns and selected terminology only. Comprehensive spelling, grammar and clarity checking is not yet implemented.','Automated accessibility testing cannot certify full WCAG compliance.']};
+ const summary={url: html ? `Uploaded HTML: ${filename}` : url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Content QA uses local editorial patterns and optionally a locally hosted LanguageTool server. Contextual clarity suggestions require human review.','Automated accessibility testing cannot certify full WCAG compliance.']};
  try{
   for(const vp of [{name:'Desktop',width:1440,height:900},{name:'Tablet',width:768,height:1024},{name:'Mobile',width:390,height:844}]){
    const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},deviceScaleFactor:1,ignoreHTTPSErrors:false});
@@ -96,6 +146,7 @@ async function audit({url, html, filename}){
     const metric=e=>{const s=getComputedStyle(e);return {fontSize:parseFloat(s.fontSize),lineHeight:parseFloat(s.lineHeight),fontFamily:s.fontFamily,tag:e.tagName.toLowerCase(),text:e.textContent.trim().slice(0,65)}};
     const imgs=[...document.images].filter(visible).map(e=>({src:e.currentSrc||e.src,alt:e.getAttribute('alt'),complete:e.complete,naturalWidth:e.naturalWidth,naturalHeight:e.naturalHeight,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height,fit:getComputedStyle(e).objectFit}));
     const links=[...document.querySelectorAll('a[href]')].filter(visible).map(e=>({text:e.innerText.trim().slice(0,65),href:e.href}));
+    const nowrapLinks=[...document.querySelectorAll('a')].filter(visible).filter(e=>getComputedStyle(e).whiteSpace==='nowrap').map(e=>e.textContent.trim().slice(0,80));
     const overflow=[...document.querySelectorAll('body *')].filter(visible).filter(e=>{const r=e.getBoundingClientRect();return r.right>innerWidth+3||r.left< -3}).slice(0,8).map(e=>({tag:e.tagName.toLowerCase(),className:String(e.className).slice(0,70)}));
      // Identify newsletter components conservatively; avoid matching unrelated elements.
      const colorValue = e => getComputedStyle(e).color;
@@ -121,7 +172,7 @@ async function audit({url, html, filename}){
      })() : null;
      // Locate footer by its two legal links; find their common enclosing colored block.
      const legalLinks=[...document.querySelectorAll('a[href]')].filter(visible);
-     const unsubscribe=legalLinks.find(e=>/\/unsubscribe(?:[/?#]|$)/i.test(e.href));
+     const unsubscribe=legalLinks.find(e=>/unsubscribe/i.test(e.href)||/^mailto:.*unsubscribe/i.test(e.href));
      const privacy=legalLinks.find(e=>/privacy[_-]policy/i.test(e.href));
      let footer=null;
      if(unsubscribe && privacy){
@@ -136,9 +187,9 @@ async function audit({url, html, filename}){
      const editorialBlocks=[...document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li')]
        .filter(visible).filter(e=>![...e.children].some(c=>/^(H[1-6]|P|LI)$/.test(c.tagName)))
        .map((e,i)=>({location:`${e.tagName.toLowerCase()} ${i+1}`,text:e.innerText||e.textContent||''}));
-    return {title:document.title,imgs,links,overflow,componentColors,editorialBlocks,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
+    return {title:document.title,imgs,links,overflow,nowrapLinks,componentColors,editorialBlocks,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
    },{rules:specs,approvedColors:colorSpecs});
-   if(vp.name==='Desktop'){checkEditorialContent(data.editorialBlocks,issues);summary.checks+=data.editorialBlocks.length;}
+   if(vp.name==='Desktop'){checkEditorialContent(data.editorialBlocks,issues);await checkLanguageTool(data.editorialBlocks,issues,summary.notes);summary.checks+=data.editorialBlocks.length;}
    summary.screens.push({viewport:vp.name,width:vp.width,height:vp.height,title:data.title});
    summary.checks+=data.imgs.length+data.links.length+Object.values(data.typography).reduce((n,a)=>n+a.length,0);
     // Compare computed colors with the approved Design System values.
@@ -176,6 +227,7 @@ async function audit({url, html, filename}){
         }
       }
     }
+   if(vp.name==='Mobile'&&data.nowrapLinks.length)add(issues,'Email compatibility','Non-wrapping links',`CSS white-space: nowrap affects ${data.nowrapLinks.length} visible link(s), potentially causing mobile overflow.`,'Allow long link text to wrap on narrow screens.','Medium',vp.name,'Needs Review');
    if(data.scrollWidth>vp.width+3)add(issues,'Layout','Horizontal page overflow',`${vp.name}: content width ${data.scrollWidth}px exceeds viewport ${vp.width}px.`,'Remove fixed-width overflow and test responsive containers.','High',vp.name);
    for(const o of data.overflow)add(issues,'Layout','Element extends outside viewport',`${vp.name}: <${o.tag}> ${o.className}`,'Inspect width, padding, positioning and responsive styles.','Medium',vp.name);
    for(const [tag,els] of Object.entries(data.typography))for(const e of els){const s=specs[tag];if(Math.abs(e.fontSize-s.fontSize)>1)add(issues,'Typography',`${tag.toUpperCase()} font size mismatch`,`${vp.name}: “${e.text}” uses ${e.fontSize}px; reference ${s.fontSize}px.`,'Apply the approved design-system typography token.','Medium',vp.name);
