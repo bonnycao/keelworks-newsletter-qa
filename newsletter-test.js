@@ -41,6 +41,18 @@ const specs = {
   h1: designSystem.typography['Heading/H1'],
   h2: designSystem.typography['Heading/H2']
 };
+
+const colorSpecs = {
+  donateButton: {
+    background: designSystem.donateButton.background.light,
+    text: designSystem.donateButton.textColor
+  },
+  footer: {
+    background: designSystem.footer.background,
+    text: designSystem.footer.textColor
+  }
+};
+
 async function audit(url){
  const issues=[];const browser=await chromium.launch({headless:true});
  const summary={url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography rules are initial reference values and should be confirmed against the final Figma Design System.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
