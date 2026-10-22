@@ -7,11 +7,12 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
 const app = express();
 const port = process.env.PORT || 3000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-app.use(express.json({limit:'20kb'}));
+app.use(express.json({limit:'3mb'}));
 app.use(express.static(path.join(__dirname,'public')));
 const jobs = new Map();
 const clean = v => String(v ?? '').replace(/[\u0000-\u001f]/g,' ').slice(0,2000);
@@ -53,9 +54,9 @@ const colorSpecs = {
   }
 };
 
-async function audit(url){
+async function audit({url, html, filename}){
  const issues=[];const browser=await chromium.launch({headless:true});
- const summary={url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
+ const summary={url: html ? `Uploaded HTML: ${filename}` : url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
  try{
   for(const vp of [{name:'Desktop',width:1440,height:900},{name:'Tablet',width:768,height:1024},{name:'Mobile',width:390,height:844}]){
    const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},deviceScaleFactor:1,ignoreHTTPSErrors:false});
@@ -63,9 +64,9 @@ async function audit(url){
    page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
    await page.route('**/*', async route=>{
     const u=route.request().url();
-    try{const dest=await validateUrl(u);if(dest)await route.continue();}catch{await route.abort();}
+    try{if(u.startsWith('data:') || u.startsWith('blob:')){await route.continue();return;} const dest=await validateUrl(u);if(dest)await route.continue();}catch{await route.abort();}
    });
-   try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});await page.waitForTimeout(1200);}
+   try{if(html){await page.setContent(html,{waitUntil:'domcontentloaded',timeout:25000});}else{await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});}await page.waitForTimeout(1200);}
    catch(e){add(issues,'Functionality','Page load failure',`${vp.name}: ${e.message}`,'Confirm the URL is accessible and the server responds correctly.','High',vp.name);await context.close();continue;}
    const data=await page.evaluate(({rules, approvedColors})=>{
     const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};
@@ -169,7 +170,17 @@ async function audit(url){
  summary.issues=[...unique.values()].map((x,i)=>({...x,id:`QA-${String(i+1).padStart(3,'0')}`}));summary.count=summary.issues.length;return summary;
 }
 app.post('/api/audit',async(req,res)=>{
- try{const url=await validateUrl(req.body?.url);const result=await audit(url);const id=crypto.randomUUID();jobs.set(id,result);if(jobs.size>25)jobs.delete(jobs.keys().next().value);res.json({id,...result});}
+ try{
+  const uploaded=req.body?.html;
+  let source;
+  if(typeof uploaded==='string'){
+   if(!uploaded.trim() || uploaded.length>2000000)throw new Error('Choose an HTML file smaller than 2 MB.');
+   const filename=String(req.body?.filename||'newsletter.html').slice(0,120);
+   if(!/\.html?$/i.test(filename))throw new Error('Only .html and .htm files are supported.');
+   const safeHtml=uploaded.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,'').replace(/<script\b[^>]*\/?>/gi,'');
+   source={html:`<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">`+safeHtml,filename};
+  }else{source={url:await validateUrl(req.body?.url)};}
+  const result=await audit(source);const id=randomUUID();jobs.set(id,result);if(jobs.size>25)jobs.delete(jobs.keys().next().value);res.json({id,...result});}
  catch(e){res.status(400).json({error:clean(e.message)});}
 });
 app.get('/api/export/:id',async(req,res)=>{
@@ -178,7 +189,7 @@ app.get('/api/export/:id',async(req,res)=>{
  ws.columns=[{header:'Defect ID',key:'id',width:13},{header:'Category',key:'category',width:21},{header:'Defect',key:'defect',width:36},{header:'Defect Description',key:'description',width:75},{header:'Change Solution',key:'solution',width:76},{header:'Severity',key:'severity',width:13},{header:'Viewport',key:'viewport',width:13},{header:'Status',key:'status',width:17}];
  ws.addRows(result.issues);ws.autoFilter={from:'A1',to:'H1'};ws.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};ws.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF263C63'}};ws.getRow(1).height=28;
  ws.eachRow((row,i)=>{if(i>1){row.alignment={vertical:'top',wrapText:true};row.height=44;if(i%2===0)row.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF1F5F9'}};}});
- const info=wb.addWorksheet('Scan Summary');info.addRows([['KeelWorks Newsletter QA Scan'],['URL',result.url],['Checked at',result.checkedAt],['Total findings',result.count],['Note','Automated results require human review.'],...result.notes.map(n=>['Limitation',n])]);info.getColumn(1).width=22;info.getColumn(2).width=110;info.getColumn(2).alignment={wrapText:true};
+ const info=wb.addWorksheet('Scan Summary');info.addRows([['KeelWorks Newsletter QA Scan'],['Source',result.url],['Checked at',result.checkedAt],['Total findings',result.count],['Note','Automated results require human review.'],...result.notes.map(n=>['Limitation',n])]);info.getColumn(1).width=22;info.getColumn(2).width=110;info.getColumn(2).alignment={wrapText:true};
  res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');res.setHeader('Content-Disposition','attachment; filename="KeelWorks_Newsletter_QA.xlsx"');await wb.xlsx.write(res);res.end();
 });
 app.listen(port,()=>console.log(`KeelWorks QA ready at http://localhost:${port}`));
