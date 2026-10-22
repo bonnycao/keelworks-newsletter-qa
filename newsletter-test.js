@@ -6,6 +6,7 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -28,11 +29,17 @@ async function validateUrl(raw){
  const ips=await dns.lookup(url.hostname,{all:true});if(!ips.length||ips.some(x=>privateIp(x.address)))throw new Error('The address must resolve to a public server.');
  return url.href;
 }
+const designSystem = JSON.parse(
+  readFileSync(
+    path.join(__dirname, 'design-system', 'design-system.json'),
+    'utf8'
+  )
+);
+
 const specs = {
-  body:{fontSize:16,lineHeight:24},
-  h1:{fontSize:24,lineHeight:33},
-  h2:{fontSize:24,lineHeight:31},
-  h3:{fontSize:20,lineHeight:27}
+  body: designSystem.typography['Body/Regular'],
+  h1: designSystem.typography['Heading/H1'],
+  h2: designSystem.typography['Heading/H2']
 };
 async function audit(url){
  const issues=[];const browser=await chromium.launch({headless:true});
