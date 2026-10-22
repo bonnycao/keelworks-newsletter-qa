@@ -55,7 +55,7 @@ const colorSpecs = {
 
 async function audit(url){
  const issues=[];const browser=await chromium.launch({headless:true});
- const summary={url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography rules are initial reference values and should be confirmed against the final Figma Design System.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
+ const summary={url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
  try{
   for(const vp of [{name:'Desktop',width:1440,height:900},{name:'Tablet',width:768,height:1024},{name:'Mobile',width:390,height:844}]){
    const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},deviceScaleFactor:1,ignoreHTTPSErrors:false});
@@ -67,16 +67,87 @@ async function audit(url){
    });
    try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});await page.waitForTimeout(1200);}
    catch(e){add(issues,'Functionality','Page load failure',`${vp.name}: ${e.message}`,'Confirm the URL is accessible and the server responds correctly.','High',vp.name);await context.close();continue;}
-   const data=await page.evaluate((rules)=>{
+   const data=await page.evaluate(({rules, approvedColors})=>{
     const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};
     const metric=e=>{const s=getComputedStyle(e);return {fontSize:parseFloat(s.fontSize),lineHeight:parseFloat(s.lineHeight),fontFamily:s.fontFamily,tag:e.tagName.toLowerCase(),text:e.textContent.trim().slice(0,65)}};
     const imgs=[...document.images].filter(visible).map(e=>({src:e.currentSrc||e.src,alt:e.getAttribute('alt'),complete:e.complete,naturalWidth:e.naturalWidth,naturalHeight:e.naturalHeight,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height,fit:getComputedStyle(e).objectFit}));
     const links=[...document.querySelectorAll('a[href]')].filter(visible).map(e=>({text:e.innerText.trim().slice(0,65),href:e.href}));
     const overflow=[...document.querySelectorAll('body *')].filter(visible).filter(e=>{const r=e.getBoundingClientRect();return r.right>innerWidth+3||r.left< -3}).slice(0,8).map(e=>({tag:e.tagName.toLowerCase(),className:String(e.className).slice(0,70)}));
-    return {title:document.title,imgs,links,overflow,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
-   },specs);
+     // Identify newsletter components conservatively; avoid matching unrelated elements.
+     const colorValue = e => getComputedStyle(e).color;
+     const backgroundValue = e => getComputedStyle(e).backgroundColor;
+     const transparent = v => !v || v==='transparent' || v==='rgba(0, 0, 0, 0)';
+     const coloredAncestor = (element, maxDepth=5) => {
+       let node=element;
+       for(let depth=0;node && depth<=maxDepth;depth++,node=node.parentElement){
+         const bg=backgroundValue(node);
+         if(!transparent(bg))return {element:node,background:bg};
+       }
+       return null;
+     };
+     const donateCandidates=[...document.querySelectorAll('a[href]')].filter(e=>
+       visible(e) && /^donate$/i.test(e.textContent.trim()) &&
+       /every\.org\/keelworks-foundation/i.test(e.href) &&
+       /donateTo=keelworks-foundation/i.test(e.href)
+     );
+     const donation=donateCandidates.length===1 ? (()=>{
+       const link=donateCandidates[0];
+       const bg=coloredAncestor(link,3);
+       return {background:bg?.background??null,text:colorValue(link)};
+     })() : null;
+     // Locate footer by its two legal links; find their common enclosing colored block.
+     const legalLinks=[...document.querySelectorAll('a[href]')].filter(visible);
+     const unsubscribe=legalLinks.find(e=>/\/unsubscribe(?:[/?#]|$)/i.test(e.href));
+     const privacy=legalLinks.find(e=>/privacy[_-]policy/i.test(e.href));
+     let footer=null;
+     if(unsubscribe && privacy){
+       const ancestors=[];for(let e=unsubscribe;e;e=e.parentElement)ancestors.push(e);
+       let common=privacy;while(common && !ancestors.includes(common))common=common.parentElement;
+       if(common){
+         const bg=coloredAncestor(common,8);
+         if(bg)footer={background:bg.background,text:colorValue(bg.element)};
+       }
+     }
+     const componentColors={donation,footer};
+    return {title:document.title,imgs,links,overflow,componentColors,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
+   },{rules:specs,approvedColors:colorSpecs});
    summary.screens.push({viewport:vp.name,width:vp.width,height:vp.height,title:data.title});
    summary.checks+=data.imgs.length+data.links.length+Object.values(data.typography).reduce((n,a)=>n+a.length,0);
+    // Compare computed colors with the approved Design System values.
+    const normalizeColor = value => {
+      if(!value)return null;
+      const v=String(value).trim().toLowerCase();
+      if(/^#[0-9a-f]{6}$/.test(v))return v;
+      if(/^#[0-9a-f]{3}$/.test(v))return '#'+[...v.slice(1)].map(c=>c+c).join('');
+      const m=v.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)$/);
+      if(!m || (m[4]!==undefined && Number(m[4])!==1))return null;
+      return '#'+m.slice(1,4).map(n=>Number(n).toString(16).padStart(2,'0')).join('');
+    };
+    for(const [key,label] of [['donation','Donate button'],['footer','Footer']]){
+      const actual=data.componentColors[key];
+      const expected=key==='donation'?colorSpecs.donateButton:colorSpecs.footer;
+      if(!actual){
+        if(vp.name==='Desktop')add(issues,'Colors',`${label} not confidently identified`,
+          'The component could not be uniquely identified in the rendered newsletter.',
+          'Review the newsletter markup and component identification before enforcing its colors.',
+          'Low',vp.name,'Needs Review');
+        continue;
+      }
+      for(const property of ['background','text']){
+        const got=normalizeColor(actual[property]);
+        const want=normalizeColor(expected[property]);
+        if(!got || !want){
+          add(issues,'Colors',`${label} ${property} color needs review`,
+            `${vp.name}: computed ${property} color is ${actual[property]??'unavailable'}; approved ${expected[property]}.`,
+            'Inspect the component and its inherited CSS colors.','Low',vp.name,'Needs Review');
+        }else if(got!==want){
+          add(issues,'Colors',`${label} ${property} color mismatch`,
+            `${vp.name}: actual ${got}; approved ${want}.`,
+            `Set the ${label.toLowerCase()} ${property} color to ${want} according to the Design System.`,
+            'Medium',vp.name);
+        }
+      }
+    }
    if(data.scrollWidth>vp.width+3)add(issues,'Layout','Horizontal page overflow',`${vp.name}: content width ${data.scrollWidth}px exceeds viewport ${vp.width}px.`,'Remove fixed-width overflow and test responsive containers.','High',vp.name);
    for(const o of data.overflow)add(issues,'Layout','Element extends outside viewport',`${vp.name}: <${o.tag}> ${o.className}`,'Inspect width, padding, positioning and responsive styles.','Medium',vp.name);
    for(const [tag,els] of Object.entries(data.typography))for(const e of els){const s=specs[tag];if(Math.abs(e.fontSize-s.fontSize)>1)add(issues,'Typography',`${tag.toUpperCase()} font size mismatch`,`${vp.name}: “${e.text}” uses ${e.fontSize}px; reference ${s.fontSize}px.`,'Apply the approved design-system typography token.','Medium',vp.name);
