@@ -54,9 +54,32 @@ const colorSpecs = {
   }
 };
 
+
+// Local, conservative editorial checks. These are suggestions, not a grammar engine.
+function checkEditorialContent(blocks, issues) {
+ const seen = new Set();
+ const flag=(category,defect,excerpt,solution)=>{
+  const key=category+'|'+defect+'|'+excerpt;
+  if(seen.has(key))return;
+  seen.add(key);
+  add(issues,category,defect,excerpt,solution,'Low','All','Needs Review');
+ };
+ for(const block of blocks){
+  const text=block.text.replace(/\s+/g,' ').trim();
+  if(!text)continue;
+  const context=`${block.location}: “${text.slice(0,240)}${text.length>240?'…':''}”`;
+  const repeated=[...text.matchAll(/\b([a-z][a-z'-]*)\s+\1\b/gi)];
+  for(const m of repeated.slice(0,3))flag('Content / Repeated words',`Repeated word: ${m[1]}`,context,`Review and remove the duplicated “${m[1]}” if unintentional.`);
+  if(/\s+[,.;!?]/.test(text))flag('Content / Punctuation','Space before punctuation',context,'Remove unnecessary spaces before punctuation.');
+  if(/([!?])\1{1,}/.test(text))flag('Content / Punctuation','Repeated punctuation',context,'Review repeated punctuation and use the approved editorial style.');
+  if(/\b(?:Keel\s+Master|Keel-Master)\b/i.test(text))flag('Content / Terminology','Possible KeelMaster naming inconsistency',context,'Confirm whether the approved program name is “KeelMaster” and correct if needed.');
+  if(/\b(?:wifi|wi-fi|WiFi)\b/.test(text))flag('Content / Terminology','Wi-Fi capitalization/style',context,'Use a consistent approved spelling such as “Wi-Fi” throughout the newsletter.');
+ }
+}
+
 async function audit({url, html, filename}){
  const issues=[];const browser=await chromium.launch({headless:true});
- const summary={url: html ? `Uploaded HTML: ${filename}` : url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Grammar, factual accuracy, content organization and intended image cropping require editorial or visual review.','Automated accessibility testing cannot certify full WCAG compliance.']};
+ const summary={url: html ? `Uploaded HTML: ${filename}` : url,checkedAt:new Date().toISOString(),screens:[],checks:0,notes:['Typography and component color checks use the approved KeelWorks Newsletter Design System JSON reference.','Content checks currently cover repeated words, selected punctuation patterns and selected terminology only. Comprehensive spelling, grammar and clarity checking is not yet implemented.','Automated accessibility testing cannot certify full WCAG compliance.']};
  try{
   for(const vp of [{name:'Desktop',width:1440,height:900},{name:'Tablet',width:768,height:1024},{name:'Mobile',width:390,height:844}]){
    const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},deviceScaleFactor:1,ignoreHTTPSErrors:false});
@@ -110,8 +133,12 @@ async function audit({url, html, filename}){
        }
      }
      const componentColors={donation,footer};
-    return {title:document.title,imgs,links,overflow,componentColors,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
+     const editorialBlocks=[...document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li')]
+       .filter(visible).filter(e=>![...e.children].some(c=>/^(H[1-6]|P|LI)$/.test(c.tagName)))
+       .map((e,i)=>({location:`${e.tagName.toLowerCase()} ${i+1}`,text:e.innerText||e.textContent||''}));
+    return {title:document.title,imgs,links,overflow,componentColors,editorialBlocks,scrollWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth,typography:Object.fromEntries(Object.keys(rules).map(k=>[k,[...document.querySelectorAll(k==='body'?'p':k)].filter(visible).slice(0,15).map(metric)])),headings:[...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible).map(e=>({level:Number(e.tagName[1]),text:e.textContent.trim().slice(0,65)}))};
    },{rules:specs,approvedColors:colorSpecs});
+   if(vp.name==='Desktop'){checkEditorialContent(data.editorialBlocks,issues);summary.checks+=data.editorialBlocks.length;}
    summary.screens.push({viewport:vp.name,width:vp.width,height:vp.height,title:data.title});
    summary.checks+=data.imgs.length+data.links.length+Object.values(data.typography).reduce((n,a)=>n+a.length,0);
     // Compare computed colors with the approved Design System values.
