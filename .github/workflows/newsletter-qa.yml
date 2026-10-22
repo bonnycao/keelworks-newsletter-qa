@@ -1,0 +1,30 @@
+# This is a basic workflow to help you get started with Actions
+
+
+name: KeelWorks Newsletter QA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qa-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Check application code
+        run: npm test
+
